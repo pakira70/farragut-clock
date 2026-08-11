@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -40,6 +41,9 @@ class MainActivity : ComponentActivity() {
         val context = LocalContext.current
         var use24HourTime by remember {
           mutableStateOf(ClockPreferences.uses24HourTime(context))
+        }
+        var nightBrightness by remember {
+          mutableStateOf(ClockPreferences.nightBrightness(context))
         }
 
         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -74,6 +78,23 @@ class MainActivity : ComponentActivity() {
                   use24HourTime = enabled
                   ClockPreferences.setUses24HourTime(context, enabled)
                 },
+              )
+            }
+            Spacer(modifier = Modifier.height(24.dp))
+            Column(modifier = Modifier.widthIn(max = 420.dp).fillMaxWidth()) {
+              Text(
+                text = stringResource(R.string.night_brightness),
+                style = MaterialTheme.typography.bodyLarge,
+              )
+              Slider(
+                value = nightBrightness,
+                onValueChange = { brightness ->
+                  nightBrightness = brightness
+                  ClockPreferences.setNightBrightness(context, brightness)
+                },
+                valueRange =
+                  ClockPreferences.MIN_NIGHT_BRIGHTNESS..
+                    ClockPreferences.MAX_NIGHT_BRIGHTNESS,
               )
             }
           }

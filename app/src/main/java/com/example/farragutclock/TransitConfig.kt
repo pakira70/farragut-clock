@@ -11,7 +11,8 @@ internal data class TransitStopConfig(
 internal object TransitConfig {
   const val gtfsRealtimeTripUpdatesUrl =
     "https://www3.septa.org/gtfsrt/septa-pa-us/Trip/rtTripUpdates.pb"
-  const val scheduledSmsUrl = "https://www3.septa.org/api/sms/index.php"
+  const val staticGtfsUrl = "https://www3.septa.org/developer/gtfs_public.zip"
+  const val staticBusArchiveName = "google_bus.zip"
   const val agencyTimeZone = "America/New_York"
 
   // These exact MVP stops and current-to-legacy route mappings are authoritative.

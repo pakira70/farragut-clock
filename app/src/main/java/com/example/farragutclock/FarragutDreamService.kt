@@ -1,10 +1,14 @@
 package com.example.farragutclock
 
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Handler
 import android.os.Looper
 import android.service.dreams.DreamService
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.style.ForegroundColorSpan
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -29,6 +33,7 @@ internal object DreamVisualStyle {
   val primaryTextColor: Int = Color.rgb(232, 232, 228)
   val secondaryTextColor: Int = Color.rgb(174, 174, 170)
   val transitLabelTextColor: Int = Color.rgb(204, 204, 200)
+  val transitDestinationTextColor: Int = Color.rgb(142, 142, 138)
   const val clockTextSizeSp: Float = 128f
   const val dateTextSizeSp: Float = 28f
   const val weatherTextSizeSp: Float = 22f
@@ -39,20 +44,23 @@ internal object DreamVisualStyle {
   const val transitTopMarginDp: Int = 24
   const val transitRowSpacingDp: Int = 6
   const val transitLabelWidthDp: Int = 56
+  const val transitRouteSpacingDp: Int = 40
 }
 
 class FarragutDreamService : DreamService() {
   private val handler = Handler(Looper.getMainLooper())
   private val weatherRepository by lazy { WeatherRepository(applicationContext) }
-  private val transitRepository by lazy { TransitRepository() }
+  private val transitRepository by lazy { TransitRepository(applicationContext) }
   private lateinit var clockView: TextView
   private lateinit var dateView: TextView
   private lateinit var weatherView: TextView
   private lateinit var transitContainer: LinearLayout
-  private val transitTimesViews = mutableMapOf<String, TextView>()
-  private val transitArrivalsByRoute = mutableMapOf<String, List<Long>>()
+  private lateinit var compositionView: LinearLayout
+  private val transitArrivalViews = mutableMapOf<String, List<TextView>>()
+  private val transitArrivalsByRoute = mutableMapOf<String, List<TransitArrival>>()
   private var dreamScope: CoroutineScope? = null
   private var use24HourTime: Boolean = false
+  private var burnInPositionIndex: Int = 0
 
   private val clockUpdater =
     object : Runnable {
@@ -68,10 +76,13 @@ class FarragutDreamService : DreamService() {
           SimpleDateFormat(DATE_FORMAT_PATTERN, Locale.getDefault()).format(nowDate)
 
         val now = System.currentTimeMillis()
+        applyNightBrightness()
         renderTransitArrivals(now)
         handler.postDelayed(this, MILLIS_PER_MINUTE - (now % MILLIS_PER_MINUTE))
       }
     }
+
+  private val brightnessApplier = Runnable { applyNightBrightness() }
 
   override fun onAttachedToWindow() {
     super.onAttachedToWindow()
@@ -82,25 +93,39 @@ class FarragutDreamService : DreamService() {
     window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
     setContentView(createDreamView())
+    applyNightBrightness()
+  }
+
+  override fun onConfigurationChanged(newConfig: Configuration) {
+    super.onConfigurationChanged(newConfig)
+    updateTransitLayout(newConfig.orientation)
+    handler.removeCallbacks(brightnessApplier)
+    handler.post(brightnessApplier)
   }
 
   override fun onDreamingStarted() {
     super.onDreamingStarted()
+    handler.removeCallbacks(brightnessApplier)
+    handler.post(brightnessApplier)
+    handler.postDelayed(brightnessApplier, BRIGHTNESS_REAPPLY_DELAY_MILLIS)
     use24HourTime = ClockPreferences.uses24HourTime(this)
     handler.removeCallbacks(clockUpdater)
     clockUpdater.run()
     startWeatherUpdates()
     startTransitUpdates()
+    startBurnInProtection()
   }
 
   override fun onDreamingStopped() {
     handler.removeCallbacks(clockUpdater)
+    handler.removeCallbacks(brightnessApplier)
     stopWeatherUpdates()
     super.onDreamingStopped()
   }
 
   override fun onDetachedFromWindow() {
     handler.removeCallbacks(clockUpdater)
+    handler.removeCallbacks(brightnessApplier)
     stopWeatherUpdates()
     super.onDetachedFromWindow()
   }
@@ -121,7 +146,7 @@ class FarragutDreamService : DreamService() {
       }
     transitContainer = createTransitContainer()
 
-    val content =
+    compositionView =
       LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         gravity = Gravity.CENTER_HORIZONTAL
@@ -161,7 +186,7 @@ class FarragutDreamService : DreamService() {
     return FrameLayout(this).apply {
       setBackgroundColor(DreamVisualStyle.backgroundColor)
       addView(
-        content,
+        compositionView,
         FrameLayout.LayoutParams(
           FrameLayout.LayoutParams.WRAP_CONTENT,
           FrameLayout.LayoutParams.WRAP_CONTENT,
@@ -184,11 +209,18 @@ class FarragutDreamService : DreamService() {
     Typeface.create(DreamVisualStyle.fontFamily, Typeface.NORMAL)
 
   private fun createTransitContainer(): LinearLayout {
-    transitTimesViews.clear()
+    transitArrivalViews.clear()
+    val useSideBySideLayout =
+      resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
 
     return LinearLayout(this).apply {
-      orientation = LinearLayout.VERTICAL
-      visibility = View.GONE
+      orientation =
+        if (useSideBySideLayout) {
+          LinearLayout.HORIZONTAL
+        } else {
+          LinearLayout.VERTICAL
+        }
+      visibility = View.VISIBLE
 
       TransitConfig.stops.forEachIndexed { index, stop ->
         val routeLabel =
@@ -198,16 +230,37 @@ class FarragutDreamService : DreamService() {
             textSize = DreamVisualStyle.transitTextSizeSp
             typeface = Typeface.create(DreamVisualStyle.fontFamily, Typeface.BOLD)
           }
-        val times =
-          secondaryTextView(DreamVisualStyle.transitTextSizeSp).apply {
-            text = NO_ARRIVALS_TEXT
+        val arrivalViews =
+          List(MAX_DISPLAYED_ARRIVALS) {
+            secondaryTextView(DreamVisualStyle.transitTextSizeSp).apply {
+              text = NO_ARRIVALS_TEXT
+            }
           }
-        transitTimesViews[stop.displayRouteName] = times
+        transitArrivalViews[stop.displayRouteName] = arrivalViews
 
-        val row =
+        val arrivalsColumn =
+          LinearLayout(this@FarragutDreamService).apply {
+            orientation = LinearLayout.VERTICAL
+            arrivalViews.forEachIndexed { arrivalIndex, arrivalView ->
+              addView(
+                arrivalView,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                  )
+                  .apply {
+                    if (arrivalIndex > 0) {
+                      topMargin = DreamVisualStyle.transitRowSpacingDp.toPixels()
+                    }
+                  },
+              )
+            }
+          }
+
+        val routeGroup =
           LinearLayout(this@FarragutDreamService).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+            gravity = Gravity.TOP
             addView(
               routeLabel,
               LinearLayout.LayoutParams(
@@ -216,7 +269,7 @@ class FarragutDreamService : DreamService() {
               ),
             )
             addView(
-              times,
+              arrivalsColumn,
               LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -225,19 +278,54 @@ class FarragutDreamService : DreamService() {
           }
 
         addView(
-          row,
+          routeGroup,
           LinearLayout.LayoutParams(
               LinearLayout.LayoutParams.WRAP_CONTENT,
               LinearLayout.LayoutParams.WRAP_CONTENT,
             )
             .apply {
               if (index > 0) {
-                topMargin = DreamVisualStyle.transitRowSpacingDp.toPixels()
+                if (useSideBySideLayout) {
+                  marginStart = DreamVisualStyle.transitRouteSpacingDp.toPixels()
+                } else {
+                  topMargin = DreamVisualStyle.transitRouteSpacingDp.toPixels()
+                }
               }
             },
         )
       }
     }
+  }
+
+  private fun updateTransitLayout(orientation: Int) {
+    if (!::transitContainer.isInitialized) return
+
+    val useSideBySideLayout = orientation == Configuration.ORIENTATION_LANDSCAPE
+    transitContainer.orientation =
+      if (useSideBySideLayout) {
+        LinearLayout.HORIZONTAL
+      } else {
+        LinearLayout.VERTICAL
+      }
+
+    for (index in 0 until transitContainer.childCount) {
+      val routeGroup = transitContainer.getChildAt(index)
+      val layoutParameters = routeGroup.layoutParams as LinearLayout.LayoutParams
+      layoutParameters.marginStart =
+        if (useSideBySideLayout && index > 0) {
+          DreamVisualStyle.transitRouteSpacingDp.toPixels()
+        } else {
+          0
+        }
+      layoutParameters.topMargin =
+        if (!useSideBySideLayout && index > 0) {
+          DreamVisualStyle.transitRouteSpacingDp.toPixels()
+        } else {
+          0
+        }
+      routeGroup.layoutParams = layoutParameters
+    }
+    transitContainer.requestLayout()
   }
 
   private fun startWeatherUpdates() {
@@ -269,9 +357,23 @@ class FarragutDreamService : DreamService() {
     }
   }
 
+  private fun startBurnInProtection() {
+    resetBurnInPosition()
+    dreamScope?.launch {
+      while (isActive) {
+        delay(BURN_IN_SHIFT_INTERVAL_MILLIS)
+        burnInPositionIndex = (burnInPositionIndex + 1) % BURN_IN_OFFSETS_PIXELS.size
+        val (offsetX, offsetY) = BURN_IN_OFFSETS_PIXELS[burnInPositionIndex]
+        compositionView.translationX = offsetX.toFloat()
+        compositionView.translationY = offsetY.toFloat()
+      }
+    }
+  }
+
   private fun stopWeatherUpdates() {
     dreamScope?.cancel()
     dreamScope = null
+    resetBurnInPosition()
   }
 
   private suspend fun refreshWeather() {
@@ -305,27 +407,35 @@ class FarragutDreamService : DreamService() {
   }
 
   private fun renderTransitArrivals(nowMillis: Long = System.currentTimeMillis()) {
-    if (transitArrivalsByRoute.isEmpty()) {
-      transitContainer.visibility = View.GONE
-      return
-    }
-
     for (stop in TransitConfig.stops) {
       val arrivals =
         transitArrivalsByRoute[stop.displayRouteName]
           .orEmpty()
-          .filter { it >= nowMillis - ARRIVAL_PAST_GRACE_MILLIS }
+          .filter { it.arrivalTimeMillis >= nowMillis - ARRIVAL_PAST_GRACE_MILLIS }
           .take(MAX_DISPLAYED_ARRIVALS)
-      transitTimesViews.getValue(stop.displayRouteName).text =
-        if (arrivals.isEmpty()) {
-          NO_ARRIVALS_TEXT
+      transitArrivalViews.getValue(stop.displayRouteName).forEachIndexed { index, view ->
+        val arrival = arrivals.getOrNull(index)
+        if (arrival == null) {
+          view.text = NO_ARRIVALS_TEXT
         } else {
-          arrivals.joinToString(ARRIVAL_SEPARATOR) { arrival ->
-            formatArrival(arrival, nowMillis)
-          }
+          view.text = formatTransitArrival(arrival, nowMillis)
         }
+      }
     }
     transitContainer.visibility = View.VISIBLE
+  }
+
+  private fun formatTransitArrival(arrival: TransitArrival, nowMillis: Long): CharSequence {
+    val arrivalText = formatArrival(arrival.arrivalTimeMillis, nowMillis)
+    val prefix = "$arrivalText   → "
+    return SpannableString(prefix + arrival.destination).apply {
+      setSpan(
+        ForegroundColorSpan(DreamVisualStyle.transitDestinationTextColor),
+        prefix.length,
+        length,
+        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+      )
+    }
   }
 
   private fun formatArrival(arrivalMillis: Long, nowMillis: Long): String {
@@ -337,15 +447,50 @@ class FarragutDreamService : DreamService() {
     }
   }
 
+  private fun applyNightBrightness() {
+    val brightness = ClockPreferences.nightBrightness(this)
+    val layoutParameters = window.attributes
+    layoutParameters.screenBrightness = brightness
+    window.setAttributes(layoutParameters)
+
+    val decorView = window.decorView
+    if (decorView.isAttachedToWindow) {
+      val attachedParameters =
+        (decorView.layoutParams as? WindowManager.LayoutParams) ?: layoutParameters
+      attachedParameters.screenBrightness = brightness
+      window.windowManager.updateViewLayout(decorView, attachedParameters)
+    }
+  }
+
+  private fun resetBurnInPosition() {
+    burnInPositionIndex = 0
+    if (::compositionView.isInitialized) {
+      compositionView.translationX = 0f
+      compositionView.translationY = 0f
+    }
+  }
+
   private fun Int.toPixels(): Int = (this * resources.displayMetrics.density).roundToInt()
 
   private companion object {
+    val BURN_IN_OFFSETS_PIXELS =
+      listOf(
+        0 to 0,
+        3 to -2,
+        -3 to 2,
+        2 to 4,
+        -2 to -4,
+        4 to 1,
+        -4 to -1,
+      )
+
     const val MILLIS_PER_MINUTE = 60_000L
+    const val BRIGHTNESS_REAPPLY_DELAY_MILLIS = 1_000L
+    const val BURN_IN_SHIFT_INTERVAL_MILLIS = 4L * MILLIS_PER_MINUTE
     const val DUE_THRESHOLD_MILLIS = 60_000L
     const val ARRIVAL_PAST_GRACE_MILLIS = 60_000L
     const val MAX_DISPLAYED_ARRIVALS = 2
     const val NO_ARRIVALS_TEXT = "--"
-    const val ARRIVAL_SEPARATOR = "   ·   "
     const val TIME_12_HOUR_PATTERN = "h:mm a"
     const val TIME_24_HOUR_PATTERN = "HH:mm"
     const val DATE_FORMAT_PATTERN = "EEEE, MMMM d"
