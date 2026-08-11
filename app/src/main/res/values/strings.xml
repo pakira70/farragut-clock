@@ -1,3 +1,5 @@
 <resources>
-    <string name="app_name">FarragutClock</string>
+    <string name="app_name">Farragut Clock</string>
+    <string name="launcher_title">Farragut Clock</string>
+    <string name="launcher_message">Configure Farragut Clock in Android Settings &gt; Display &gt; Screen saver.</string>
 </resources>
