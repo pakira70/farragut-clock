@@ -10,6 +10,7 @@ internal object ClockPreferences {
   private const val PREFERENCES_NAME = "clock_preferences"
   private const val KEY_USE_24_HOUR_TIME = "use_24_hour_time"
   private const val KEY_NIGHT_BRIGHTNESS = "night_brightness"
+  private const val KEY_USE_TROLLEY_DISPLAY = "use_trolley_display"
 
   fun uses24HourTime(context: Context): Boolean =
     context
@@ -21,6 +22,19 @@ internal object ClockPreferences {
       .getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
       .edit()
       .putBoolean(KEY_USE_24_HOUR_TIME, enabled)
+      .apply()
+  }
+
+  fun usesTrolleyDisplay(context: Context): Boolean =
+    context
+      .getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+      .getBoolean(KEY_USE_TROLLEY_DISPLAY, false)
+
+  fun setUsesTrolleyDisplay(context: Context, enabled: Boolean) {
+    context
+      .getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+      .edit()
+      .putBoolean(KEY_USE_TROLLEY_DISPLAY, enabled)
       .apply()
   }
 

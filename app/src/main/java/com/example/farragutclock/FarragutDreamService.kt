@@ -38,6 +38,10 @@ internal object DreamVisualStyle {
   const val dateTextSizeSp: Float = 32f
   const val weatherTextSizeSp: Float = 26f
   const val transitTextSizeSp: Float = 24f
+  const val trolleyClockTextSizeSp: Float = 56f
+  const val trolleyDateTextSizeSp: Float = 26f
+  const val trolleyWeatherTextSizeSp: Float = 40f
+  const val trolleyTransitTextSizeSp: Float = 34f
   const val fontFamily: String = "sans-serif"
   const val dateTopMarginDp: Int = 8
   const val weatherTopMarginDp: Int = 14
@@ -56,10 +60,12 @@ class FarragutDreamService : DreamService() {
   private lateinit var weatherView: TextView
   private lateinit var transitContainer: LinearLayout
   private lateinit var compositionView: LinearLayout
+  private val transitRouteLabelViews = mutableMapOf<String, TextView>()
   private val transitArrivalViews = mutableMapOf<String, List<TextView>>()
   private val transitArrivalsByRoute = mutableMapOf<String, List<TransitArrival>>()
   private var dreamScope: CoroutineScope? = null
   private var use24HourTime: Boolean = false
+  private var useTrolleyDisplay: Boolean = false
   private var burnInPositionIndex: Int = 0
 
   private val clockUpdater =
@@ -93,6 +99,8 @@ class FarragutDreamService : DreamService() {
     window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
     setContentView(createDreamView())
+    useTrolleyDisplay = ClockPreferences.usesTrolleyDisplay(this)
+    applyDisplayMode()
     applyNightBrightness()
   }
 
@@ -109,6 +117,8 @@ class FarragutDreamService : DreamService() {
     handler.post(brightnessApplier)
     handler.postDelayed(brightnessApplier, BRIGHTNESS_REAPPLY_DELAY_MILLIS)
     use24HourTime = ClockPreferences.uses24HourTime(this)
+    useTrolleyDisplay = ClockPreferences.usesTrolleyDisplay(this)
+    applyDisplayMode()
     handler.removeCallbacks(clockUpdater)
     clockUpdater.run()
     startWeatherUpdates()
@@ -209,6 +219,7 @@ class FarragutDreamService : DreamService() {
     Typeface.create(DreamVisualStyle.fontFamily, Typeface.NORMAL)
 
   private fun createTransitContainer(): LinearLayout {
+    transitRouteLabelViews.clear()
     transitArrivalViews.clear()
     val useSideBySideLayout =
       resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
@@ -230,6 +241,7 @@ class FarragutDreamService : DreamService() {
             textSize = DreamVisualStyle.transitTextSizeSp
             typeface = Typeface.create(DreamVisualStyle.fontFamily, Typeface.BOLD)
           }
+        transitRouteLabelViews[stop.displayRouteName] = routeLabel
         val arrivalViews =
           List(MAX_DISPLAYED_ARRIVALS) {
             secondaryTextView(DreamVisualStyle.transitTextSizeSp).apply {
@@ -445,6 +457,40 @@ class FarragutDreamService : DreamService() {
     } else {
       "${(millisUntilArrival / MILLIS_PER_MINUTE).coerceAtLeast(1L)} min"
     }
+  }
+
+  private fun applyDisplayMode() {
+    val clockSize =
+      if (useTrolleyDisplay) {
+        DreamVisualStyle.trolleyClockTextSizeSp
+      } else {
+        DreamVisualStyle.clockTextSizeSp
+      }
+    val dateSize =
+      if (useTrolleyDisplay) {
+        DreamVisualStyle.trolleyDateTextSizeSp
+      } else {
+        DreamVisualStyle.dateTextSizeSp
+      }
+    val weatherSize =
+      if (useTrolleyDisplay) {
+        DreamVisualStyle.trolleyWeatherTextSizeSp
+      } else {
+        DreamVisualStyle.weatherTextSizeSp
+      }
+    val transitSize =
+      if (useTrolleyDisplay) {
+        DreamVisualStyle.trolleyTransitTextSizeSp
+      } else {
+        DreamVisualStyle.transitTextSizeSp
+      }
+
+    clockView.textSize = clockSize
+    dateView.textSize = dateSize
+    weatherView.textSize = weatherSize
+    transitRouteLabelViews.values.forEach { it.textSize = transitSize }
+    transitArrivalViews.values.flatten().forEach { it.textSize = transitSize }
+    compositionView.requestLayout()
   }
 
   private fun applyNightBrightness() {

@@ -42,6 +42,9 @@ class MainActivity : ComponentActivity() {
         var use24HourTime by remember {
           mutableStateOf(ClockPreferences.uses24HourTime(context))
         }
+        var useTrolleyDisplay by remember {
+          mutableStateOf(ClockPreferences.usesTrolleyDisplay(context))
+        }
         var nightBrightness by remember {
           mutableStateOf(ClockPreferences.nightBrightness(context))
         }
@@ -77,6 +80,24 @@ class MainActivity : ComponentActivity() {
                 onCheckedChange = { enabled ->
                   use24HourTime = enabled
                   ClockPreferences.setUses24HourTime(context, enabled)
+                },
+              )
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+            Row(
+              modifier = Modifier.widthIn(max = 420.dp).fillMaxWidth(),
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+              Text(
+                text = stringResource(R.string.use_trolley_display),
+                style = MaterialTheme.typography.bodyLarge,
+              )
+              Switch(
+                checked = useTrolleyDisplay,
+                onCheckedChange = { enabled ->
+                  useTrolleyDisplay = enabled
+                  ClockPreferences.setUsesTrolleyDisplay(context, enabled)
                 },
               )
             }

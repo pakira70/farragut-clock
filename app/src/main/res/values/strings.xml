@@ -3,5 +3,6 @@
     <string name="launcher_title">Farragut Clock</string>
     <string name="launcher_message">Configure Farragut Clock in Android Settings &gt; Display &gt; Screen saver.</string>
     <string name="use_24_hour_time">24-hour time</string>
+    <string name="use_trolley_display">Trolley-first display</string>
     <string name="night_brightness">Night brightness</string>
 </resources>
