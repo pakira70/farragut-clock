@@ -33,11 +33,11 @@ internal object DreamVisualStyle {
   val primaryTextColor: Int = Color.rgb(232, 232, 228)
   val secondaryTextColor: Int = Color.rgb(174, 174, 170)
   val transitLabelTextColor: Int = Color.rgb(204, 204, 200)
-  val transitDestinationTextColor: Int = Color.rgb(142, 142, 138)
-  const val clockTextSizeSp: Float = 128f
-  const val dateTextSizeSp: Float = 28f
-  const val weatherTextSizeSp: Float = 22f
-  const val transitTextSizeSp: Float = 20f
+  val transitDestinationTextColor: Int = Color.rgb(158, 158, 154)
+  const val clockTextSizeSp: Float = 104f
+  const val dateTextSizeSp: Float = 32f
+  const val weatherTextSizeSp: Float = 26f
+  const val transitTextSizeSp: Float = 24f
   const val fontFamily: String = "sans-serif"
   const val dateTopMarginDp: Int = 8
   const val weatherTopMarginDp: Int = 14
@@ -492,7 +492,7 @@ class FarragutDreamService : DreamService() {
     const val MAX_DISPLAYED_ARRIVALS = 2
     const val NO_ARRIVALS_TEXT = "--"
     const val TIME_12_HOUR_PATTERN = "h:mm a"
-    const val TIME_24_HOUR_PATTERN = "HH:mm"
+    const val TIME_24_HOUR_PATTERN = "H:mm"
     const val DATE_FORMAT_PATTERN = "EEEE, MMMM d"
   }
 }
