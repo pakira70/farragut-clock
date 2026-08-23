@@ -1,6 +1,7 @@
 package com.example.farragutclock
 
 import android.content.Context
+import android.util.Log
 import com.google.transit.realtime.GtfsRealtime.FeedMessage
 import com.google.transit.realtime.GtfsRealtime.TripUpdate.StopTimeUpdate
 import kotlinx.coroutines.Dispatchers
@@ -18,6 +19,8 @@ internal data class TransitArrival(
   val arrivalTimeMillis: Long,
   val tripId: String?,
   val destination: String,
+  val tracked: Boolean,
+  val directionId: Int? = null,
 )
 
 internal class TransitRepository(context: Context) {
@@ -37,26 +40,26 @@ internal class TransitRepository(context: Context) {
           null
         }
 
+      if (realtimeArrivals == null && lookup == null) {
+        error("No SEPTA arrival source was available")
+      }
+
       val refreshedRoutes = mutableMapOf<String, List<TransitArrival>>()
       for (stop in TransitConfig.stops) {
         val predicted = realtimeArrivals?.get(stop.displayRouteName).orEmpty()
-        if (predicted.size >= MAX_ARRIVALS) {
-          refreshedRoutes[stop.displayRouteName] = predicted
-          continue
-        }
-
-        val scheduled = lookup?.scheduledArrivals(stop, nowMillis)
-
-        when {
-          scheduled != null ->
-            refreshedRoutes[stop.displayRouteName] =
-              normalizeArrivals(predicted + scheduled, nowMillis)
-          predicted.isNotEmpty() -> refreshedRoutes[stop.displayRouteName] = predicted
-        }
-      }
-
-      if (realtimeArrivals == null && refreshedRoutes.isEmpty()) {
-        error("No SEPTA arrival source was available")
+        val scheduled =
+          if (lookup == null || lookup.isFeedExpired(nowMillis)) {
+            emptyList()
+          } else {
+            lookup.scheduledArrivals(stop, nowMillis)
+          }
+        val combined =
+          if (TransitRules.hasEnoughLivePredictions(predicted, nowMillis, MAX_ARRIVALS)) {
+            predicted
+          } else {
+            predicted + scheduled
+          }
+        refreshedRoutes[stop.displayRouteName] = normalizeArrivals(combined, nowMillis)
       }
 
       refreshedRoutes
@@ -87,6 +90,12 @@ internal class TransitRepository(context: Context) {
         tripUpdate.trip.tripId.takeIf {
           tripUpdate.trip.hasTripId() && it.isNotBlank()
         }
+      val directionId =
+        if (tripUpdate.trip.hasDirectionId()) {
+          tripUpdate.trip.directionId
+        } else {
+          null
+        }
       for (stopUpdate in tripUpdate.stopTimeUpdateList) {
         if (!stopUpdate.hasStopId() || stopUpdate.stopId != stop.stopId) continue
 
@@ -98,10 +107,12 @@ internal class TransitRepository(context: Context) {
                 arrivalTimeMillis = predictedTime,
                 tripId = tripId,
                 destination =
-                  tripId
-                    ?.let { lookup?.headsignFor(it, stop.stopId) }
+                  lookup
+                    ?.headsignFor(tripId, stop.stopId, stop.currentGtfsRouteId, directionId)
                     .orEmpty()
                     .ifBlank { UNKNOWN_DESTINATION },
+                tracked = true,
+                directionId = directionId,
               ),
             )
         }
@@ -113,32 +124,56 @@ internal class TransitRepository(context: Context) {
 
   private fun ensureStaticLookup(nowMillis: Long): StaticGtfsLookup? {
     val archive = File(cacheDirectory, STATIC_BUS_ARCHIVE_CACHE_NAME)
+    if (staticLookup == null && archive.exists()) {
+      try {
+        staticLookup = parseStaticLookup(archive).lookup
+      } catch (exception: Exception) {
+        Log.w(TAG, "Failed to parse cached SEPTA static GTFS", exception)
+      }
+    }
+
+    val feedExpired = staticLookup?.isFeedExpired(nowMillis) == true
     val archiveIsStale =
-      !archive.exists() || nowMillis - archive.lastModified() >= STATIC_REFRESH_INTERVAL_MILLIS
-    var archiveRefreshed = false
+      !archive.exists() ||
+        nowMillis - archive.lastModified() >= STATIC_REFRESH_INTERVAL_MILLIS ||
+        feedExpired
+    val retryInterval =
+      if (feedExpired || !archive.exists()) {
+        STATIC_REFRESH_EXPIRED_RETRY_MILLIS
+      } else {
+        STATIC_REFRESH_RETRY_INTERVAL_MILLIS
+      }
 
     if (
       archiveIsStale &&
-        nowMillis - lastStaticRefreshAttemptMillis >= STATIC_REFRESH_RETRY_INTERVAL_MILLIS
+        nowMillis - lastStaticRefreshAttemptMillis >= retryInterval
     ) {
       lastStaticRefreshAttemptMillis = nowMillis
-      try {
-        downloadStaticBusArchive(archive, nowMillis)
-        archiveRefreshed = true
-      } catch (_: Exception) {
-        // A previously cached archive remains usable if refreshing fails.
-      }
-    }
-
-    if ((staticLookup == null || archiveRefreshed) && archive.exists()) {
-      try {
-        staticLookup = parseStaticLookup(archive)
-      } catch (_: Exception) {
-        // Keep the previously parsed lookup if a replacement cannot be parsed.
-      }
+      tryPromoteStaticArchive(archive, nowMillis)
     }
 
     return staticLookup
+  }
+
+  private fun tryPromoteStaticArchive(archive: File, nowMillis: Long) {
+    val downloaded = File.createTempFile("septa_bus_new_", ".zip", cacheDirectory)
+    try {
+      downloadStaticBusArchive(downloaded, nowMillis)
+      val parsed = parseStaticLookup(downloaded, persistScheduleCache = false)
+      downloaded.copyTo(archive, overwrite = true)
+      archive.setLastModified(nowMillis)
+      if (parsed.stopCalls.isNotEmpty()) {
+        writeScheduleCache(File(cacheDirectory, STATIC_SCHEDULE_CACHE_NAME), parsed.stopCalls)
+      } else {
+        File(cacheDirectory, STATIC_SCHEDULE_CACHE_NAME).delete()
+      }
+      staticLookup = parsed.lookup
+      Log.i(TAG, "Promoted new SEPTA static GTFS")
+    } catch (exception: Exception) {
+      Log.w(TAG, "Failed to refresh SEPTA static GTFS; keeping previous archive", exception)
+    } finally {
+      downloaded.delete()
+    }
   }
 
   private fun downloadStaticBusArchive(destination: File, nowMillis: Long) {
@@ -168,61 +203,191 @@ internal class TransitRepository(context: Context) {
     }
   }
 
-  private fun parseStaticLookup(archive: File): StaticGtfsLookup =
+  private fun parseStaticLookup(
+    archive: File,
+    persistScheduleCache: Boolean = true,
+  ): ParsedStaticGtfs =
     ZipFile(archive).use { zip ->
       val trips = parseTrips(zip)
-      val calendars = parseCalendars(zip)
-      val calendarExceptions = parseCalendarExceptions(zip)
+      val tripHeadsigns =
+        trips.mapValues { (_, trip) -> trip.tripHeadsign }.filterValues { it.isNotBlank() }
+      val directionDestinations =
+        try {
+          parseDirections(zip)
+        } catch (_: Exception) {
+          emptyMap()
+        }
+      val feedDates = parseFeedInfo(zip)
       val headsigns = mutableMapOf<TripStopKey, String>()
       val stopCalls = mutableListOf<StaticStopCall>()
-      val selectedStopIds = TransitConfig.stops.mapTo(mutableSetOf()) { it.stopId }
-      val selectedStopMarkers = selectedStopIds.map { ",$it," }
+      var calendars = emptyMap<String, ServiceCalendar>()
+      var calendarExceptions = emptyMap<Int, Map<String, Int>>()
 
-      zip.readerFor("stop_times.txt").use { reader ->
-        val headers = reader.readCsvHeaders()
-        val tripIdIndex = headers.requiredIndex("trip_id")
-        val arrivalTimeIndex = headers.requiredIndex("arrival_time")
-        val stopIdIndex = headers.requiredIndex("stop_id")
-        val stopHeadsignIndex = headers.requiredIndex("stop_headsign")
-
-        reader.forEachLine { line ->
-          if (selectedStopMarkers.none(line::contains)) return@forEachLine
-
-          val fields = parseCsvLine(line)
-          val stopId = fields.valueAt(stopIdIndex)
-          if (stopId !in selectedStopIds) return@forEachLine
-
-          val tripId = fields.valueAt(tripIdIndex)
-          val trip = trips[tripId] ?: return@forEachLine
-          val destination =
-            fields
-              .valueAt(stopHeadsignIndex)
-              .trim()
-              .ifBlank { trip.tripHeadsign }
-              .ifBlank { UNKNOWN_DESTINATION }
-          val arrivalSeconds =
-            parseGtfsTime(fields.valueAt(arrivalTimeIndex)) ?: return@forEachLine
-
-          headsigns[TripStopKey(tripId, stopId)] = destination
-          stopCalls +=
-            StaticStopCall(
-              tripId = tripId,
-              routeName = trip.routeName,
-              stopId = stopId,
-              serviceId = trip.serviceId,
-              arrivalSeconds = arrivalSeconds,
-              destination = destination,
-            )
+      try {
+        calendars = parseCalendars(zip)
+        calendarExceptions = parseCalendarExceptions(zip)
+        val scheduleCache = File(cacheDirectory, STATIC_SCHEDULE_CACHE_NAME)
+        if (!loadScheduleCache(scheduleCache, archive, headsigns, stopCalls)) {
+          parseStopTimes(zip, trips, headsigns, stopCalls)
+          if (persistScheduleCache && stopCalls.isNotEmpty()) {
+            writeScheduleCache(scheduleCache, stopCalls)
+          }
         }
+        Log.i(TAG, "Loaded ${stopCalls.size} scheduled stop calls")
+      } catch (failure: Throwable) {
+        Log.w(TAG, "Failed to parse SEPTA stop schedules; using trip headsigns only", failure)
       }
 
-      StaticGtfsLookup(
-        headsigns = headsigns,
-        stopCallsByRoute = stopCalls.groupBy { it.routeName },
-        calendars = calendars,
-        calendarExceptions = calendarExceptions,
+      Log.i(
+        TAG,
+        "Loaded ${tripHeadsigns.size} SEPTA trip headsigns " +
+          "(feed ${feedDates.startDate}-${feedDates.endDate})",
+      )
+      ParsedStaticGtfs(
+        lookup =
+          StaticGtfsLookup(
+            stopHeadsigns = headsigns,
+            tripHeadsigns = tripHeadsigns,
+            directionDestinations = directionDestinations,
+            defaultHeadsignsByStop = defaultHeadsignsByStop(stopCalls),
+            stopCallsByRoute = stopCalls.groupBy { it.routeName },
+            calendars = calendars,
+            calendarExceptions = calendarExceptions,
+            feedStartDate = feedDates.startDate,
+            feedEndDate = feedDates.endDate,
+          ),
+        stopCalls = stopCalls.toList(),
       )
     }
+
+  private fun parseFeedInfo(zip: ZipFile): FeedDates {
+    val entry = zip.getEntry("feed_info.txt") ?: return FeedDates(null, null)
+    return zip.getInputStream(entry).bufferedReader().use { reader ->
+      val headers = reader.readCsvHeaders()
+      val startIndex = headers.indexOf("feed_start_date")
+      val endIndex = headers.indexOf("feed_end_date")
+      val line = reader.readLine() ?: return FeedDates(null, null)
+      if (line.isBlank()) return FeedDates(null, null)
+      val fields = parseCsvLine(line)
+      FeedDates(
+        startDate = if (startIndex >= 0) fields.valueAt(startIndex).toIntOrNull() else null,
+        endDate = if (endIndex >= 0) fields.valueAt(endIndex).toIntOrNull() else null,
+      )
+    }
+  }
+
+  private fun parseStopTimes(
+    zip: ZipFile,
+    trips: Map<String, StaticTrip>,
+    headsigns: MutableMap<TripStopKey, String>,
+    stopCalls: MutableList<StaticStopCall>,
+  ) {
+    val selectedStopIds = TransitConfig.stops.mapTo(mutableSetOf()) { it.stopId }
+    val selectedStopMarkers = selectedStopIds.map { ",$it,".toByteArray(Charsets.US_ASCII) }
+    var tripIdIndex = -1
+    var arrivalTimeIndex = -1
+    var stopIdIndex = -1
+    var stopHeadsignIndex = -1
+    var headersReady = false
+
+    zip.forEachAsciiLine("stop_times.txt") { lineBytes, length ->
+      if (!headersReady) {
+        val headers =
+          parseCsvLine(String(lineBytes, 0, length, Charsets.UTF_8)).mapIndexed { index, value ->
+            if (index == 0) value.removePrefix("\uFEFF") else value
+          }
+        tripIdIndex = headers.requiredIndex("trip_id")
+        arrivalTimeIndex = headers.requiredIndex("arrival_time")
+        stopIdIndex = headers.requiredIndex("stop_id")
+        stopHeadsignIndex = headers.requiredIndex("stop_headsign")
+        headersReady = true
+        return@forEachAsciiLine
+      }
+      if (!lineBytes.containsMarker(length, selectedStopMarkers)) return@forEachAsciiLine
+
+      val fields = parseCsvLine(String(lineBytes, 0, length, Charsets.UTF_8))
+      val stopId = fields.valueAt(stopIdIndex)
+      if (stopId !in selectedStopIds) return@forEachAsciiLine
+
+      val tripId = fields.valueAt(tripIdIndex)
+      val trip = trips[tripId] ?: return@forEachAsciiLine
+      val destination =
+        fields
+          .valueAt(stopHeadsignIndex)
+          .trim()
+          .ifBlank { trip.tripHeadsign }
+          .ifBlank { UNKNOWN_DESTINATION }
+      if (destination != UNKNOWN_DESTINATION) {
+        headsigns[TripStopKey(tripId, stopId)] = destination
+      }
+      val arrivalSeconds =
+        parseGtfsTime(fields.valueAt(arrivalTimeIndex)) ?: return@forEachAsciiLine
+
+      stopCalls +=
+        StaticStopCall(
+          tripId = tripId,
+          routeName = trip.routeName,
+          stopId = stopId,
+          serviceId = trip.serviceId,
+          arrivalSeconds = arrivalSeconds,
+          destination = destination,
+        )
+    }
+  }
+
+  private fun loadScheduleCache(
+    cache: File,
+    archive: File,
+    headsigns: MutableMap<TripStopKey, String>,
+    stopCalls: MutableList<StaticStopCall>,
+  ): Boolean {
+    if (!cache.exists() || cache.lastModified() < archive.lastModified()) return false
+    return try {
+      cache.bufferedReader().use { reader ->
+        if (reader.readLine() != SCHEDULE_CACHE_VERSION) return false
+        val loadedCalls = mutableListOf<StaticStopCall>()
+        val loadedHeadsigns = mutableMapOf<TripStopKey, String>()
+        while (true) {
+          val line = reader.readLine() ?: break
+          val fields = line.split('\t')
+          if (fields.size != 6) return false
+          val call =
+            StaticStopCall(
+              tripId = fields[0],
+              routeName = fields[1],
+              stopId = fields[2],
+              serviceId = fields[3],
+              arrivalSeconds = fields[4].toInt(),
+              destination = fields[5],
+            )
+          loadedCalls += call
+          if (call.destination != UNKNOWN_DESTINATION) {
+            loadedHeadsigns[TripStopKey(call.tripId, call.stopId)] = call.destination
+          }
+        }
+        headsigns.putAll(loadedHeadsigns)
+        stopCalls += loadedCalls
+        true
+      }
+    } catch (_: Exception) {
+      false
+    }
+  }
+
+  private fun writeScheduleCache(cache: File, stopCalls: List<StaticStopCall>) {
+    cache.bufferedWriter().use { writer ->
+      writer.appendLine(SCHEDULE_CACHE_VERSION)
+      for (call in stopCalls) {
+        writer.append(call.tripId).append('\t')
+        writer.append(call.routeName).append('\t')
+        writer.append(call.stopId).append('\t')
+        writer.append(call.serviceId).append('\t')
+        writer.append(call.arrivalSeconds.toString()).append('\t')
+        writer.appendLine(call.destination)
+      }
+    }
+    cache.setLastModified(System.currentTimeMillis())
+  }
 
   private fun parseTrips(zip: ZipFile): Map<String, StaticTrip> {
     val routeNamesByGtfsId =
@@ -255,6 +420,48 @@ internal class TransitRepository(context: Context) {
     return trips
   }
 
+  private fun parseDirections(zip: ZipFile): Map<RouteDirectionKey, String> {
+    val entry = zip.getEntry("directions.txt") ?: return emptyMap()
+    return try {
+      val destinations = mutableMapOf<RouteDirectionKey, String>()
+      zip.getInputStream(entry).bufferedReader().use { reader ->
+        val headers = reader.readCsvHeaders()
+        val routeIdIndex = headers.requiredIndex("route_id")
+        val directionIdIndex = headers.requiredIndex("direction_id")
+        val destinationIndex =
+          headers.indexOf("direction_destination").takeIf { it >= 0 }
+            ?: headers.requiredIndex("direction")
+
+        reader.forEachLine { line ->
+          if (line.isBlank()) return@forEachLine
+          val fields = parseCsvLine(line)
+          val routeId = fields.valueAt(routeIdIndex)
+          val directionId = fields.valueAt(directionIdIndex).toIntOrNull() ?: return@forEachLine
+          val destination = fields.valueAt(destinationIndex).trim()
+          if (routeId.isBlank() || destination.isBlank()) return@forEachLine
+          destinations[RouteDirectionKey(routeId, directionId)] = destination
+        }
+      }
+      destinations
+    } catch (_: Exception) {
+      emptyMap()
+    }
+  }
+
+  private fun defaultHeadsignsByStop(stopCalls: List<StaticStopCall>): Map<String, String> =
+    stopCalls
+      .filter { it.destination != UNKNOWN_DESTINATION }
+      .groupBy { it.stopId }
+      .mapNotNull { (stopId, calls) ->
+        calls
+          .groupingBy { it.destination }
+          .eachCount()
+          .maxByOrNull { it.value }
+          ?.key
+          ?.let { stopId to it }
+      }
+      .toMap()
+
   private fun parseCalendars(zip: ZipFile): Map<String, ServiceCalendar> {
     val calendars = mutableMapOf<String, ServiceCalendar>()
     zip.readerFor("calendar.txt").use { reader ->
@@ -274,11 +481,16 @@ internal class TransitRepository(context: Context) {
         )
 
       reader.forEachLine { line ->
+        if (line.isBlank()) return@forEachLine
         val fields = parseCsvLine(line)
-        calendars[fields.valueAt(serviceIdIndex)] =
+        val startDate = fields.valueAt(startDateIndex).toIntOrNull() ?: return@forEachLine
+        val endDate = fields.valueAt(endDateIndex).toIntOrNull() ?: return@forEachLine
+        val serviceId = fields.valueAt(serviceIdIndex)
+        if (serviceId.isBlank()) return@forEachLine
+        calendars[serviceId] =
           ServiceCalendar(
-            startDate = fields.valueAt(startDateIndex).toInt(),
-            endDate = fields.valueAt(endDateIndex).toInt(),
+            startDate = startDate,
+            endDate = endDate,
             activeDays =
               dayIndexes.mapValues { (_, index) -> fields.valueAt(index) == "1" },
           )
@@ -296,14 +508,13 @@ internal class TransitRepository(context: Context) {
       val exceptionTypeIndex = headers.requiredIndex("exception_type")
 
       reader.forEachLine { line ->
+        if (line.isBlank()) return@forEachLine
         val fields = parseCsvLine(line)
-        val date = fields.valueAt(dateIndex).toInt()
-        exceptions
-          .getOrPut(date, ::mutableMapOf)
-          .put(
-            fields.valueAt(serviceIdIndex),
-            fields.valueAt(exceptionTypeIndex).toInt(),
-          )
+        val date = fields.valueAt(dateIndex).toIntOrNull() ?: return@forEachLine
+        val serviceId = fields.valueAt(serviceIdIndex)
+        val exceptionType = fields.valueAt(exceptionTypeIndex).toIntOrNull() ?: return@forEachLine
+        if (serviceId.isBlank()) return@forEachLine
+        exceptions.getOrPut(date, ::mutableMapOf)[serviceId] = exceptionType
       }
     }
     return exceptions
@@ -312,14 +523,36 @@ internal class TransitRepository(context: Context) {
   private fun normalizeArrivals(
     arrivals: List<TransitArrival>,
     nowMillis: Long,
-  ): List<TransitArrival> =
-    arrivals
-      .asSequence()
-      .filter { it.arrivalTimeMillis >= nowMillis - PAST_ARRIVAL_GRACE_MILLIS }
-      .distinctBy { it.tripId ?: "${it.arrivalTimeMillis}:${it.destination}" }
-      .sortedBy { it.arrivalTimeMillis }
-      .take(MAX_ARRIVALS)
-      .toList()
+  ): List<TransitArrival> {
+    val upcoming =
+      arrivals
+        .filter { it.arrivalTimeMillis >= nowMillis - PAST_ARRIVAL_GRACE_MILLIS }
+        .sortedBy { it.arrivalTimeMillis }
+
+    val deduped = mutableListOf<TransitArrival>()
+    for (arrival in upcoming) {
+      val existingIndex = deduped.indexOfFirst { isLikelySameTrip(it, arrival) }
+      if (existingIndex < 0) {
+        deduped += arrival
+        continue
+      }
+      if (arrival.tracked && !deduped[existingIndex].tracked) {
+        deduped[existingIndex] = arrival
+      }
+    }
+
+    return deduped.take(MAX_ARRIVALS)
+  }
+
+  private fun isLikelySameTrip(first: TransitArrival, second: TransitArrival): Boolean =
+    TransitRules.isLikelySameTrip(
+      first.tripId,
+      first.directionId,
+      first.arrivalTimeMillis,
+      second.tripId,
+      second.directionId,
+      second.arrivalTimeMillis,
+    )
 
   private fun StopTimeUpdate.predictedTimeMillis(): Long? =
     when {
@@ -330,6 +563,54 @@ internal class TransitRepository(context: Context) {
 
   private fun ZipFile.readerFor(entryName: String) =
     getInputStream(getEntry(entryName) ?: error("$entryName is missing")).bufferedReader()
+
+  private fun ZipFile.forEachAsciiLine(
+    entryName: String,
+    handle: (ByteArray, Int) -> Unit,
+  ) {
+    getInputStream(getEntry(entryName) ?: error("$entryName is missing")).buffered(64 * 1024).use { input ->
+      var line = ByteArray(512)
+      var lineLength = 0
+      val buffer = ByteArray(64 * 1024)
+      while (true) {
+        val read = input.read(buffer)
+        if (read < 0) break
+        for (index in 0 until read) {
+          val byte = buffer[index]
+          if (byte == NEWLINE_BYTE) {
+            var length = lineLength
+            if (length > 0 && line[length - 1] == CARRIAGE_RETURN_BYTE) length--
+            handle(line, length)
+            lineLength = 0
+          } else {
+            if (lineLength >= line.size) {
+              line = line.copyOf(line.size * 2)
+            }
+            line[lineLength++] = byte
+          }
+        }
+      }
+      if (lineLength > 0) {
+        var length = lineLength
+        if (line[length - 1] == CARRIAGE_RETURN_BYTE) length--
+        handle(line, length)
+      }
+    }
+  }
+
+  private fun ByteArray.containsMarker(length: Int, markers: List<ByteArray>): Boolean {
+    for (marker in markers) {
+      val lastStart = length - marker.size
+      if (lastStart < 0) continue
+      start@ for (start in 0..lastStart) {
+        for (offset in marker.indices) {
+          if (this[start + offset] != marker[offset]) continue@start
+        }
+        return true
+      }
+    }
+    return false
+  }
 
   private fun java.io.BufferedReader.readCsvHeaders(): List<String> =
     parseCsvLine(readLine() ?: error("CSV file is empty")).mapIndexed { index, value ->
@@ -396,19 +677,34 @@ internal class TransitRepository(context: Context) {
 
   internal companion object {
     const val REFRESH_INTERVAL_MILLIS = 30_000L
+    private const val TAG = "FarragutTransit"
 
     private const val UNKNOWN_DESTINATION = "destination unknown"
     private const val STATIC_BUS_ARCHIVE_CACHE_NAME = "septa_google_bus.zip"
+    private const val STATIC_SCHEDULE_CACHE_NAME = "septa_stop_calls.tsv"
+    private const val SCHEDULE_CACHE_VERSION = "v1"
     private const val STATIC_REFRESH_INTERVAL_MILLIS = 24L * 60L * 60L * 1_000L
     private const val STATIC_REFRESH_RETRY_INTERVAL_MILLIS = 6L * 60L * 60L * 1_000L
+    private const val STATIC_REFRESH_EXPIRED_RETRY_MILLIS = 15L * 60L * 1_000L
     private const val MAX_ARRIVALS = 2
     private const val MILLIS_PER_SECOND = 1_000L
-    private const val PAST_ARRIVAL_GRACE_MILLIS = 60_000L
+    private const val PAST_ARRIVAL_GRACE_MILLIS = TransitRules.PAST_ARRIVAL_GRACE_MILLIS
     private const val NETWORK_TIMEOUT_MILLIS = 10_000
+    private const val NEWLINE_BYTE: Byte = 0x0A
+    private const val CARRIAGE_RETURN_BYTE: Byte = 0x0D
   }
 }
 
+private data class ParsedStaticGtfs(
+  val lookup: StaticGtfsLookup,
+  val stopCalls: List<StaticStopCall>,
+)
+
+private data class FeedDates(val startDate: Int?, val endDate: Int?)
+
 private data class TripStopKey(val tripId: String, val stopId: String)
+
+private data class RouteDirectionKey(val routeId: String, val directionId: Int)
 
 private data class StaticTrip(
   val routeName: String,
@@ -432,24 +728,52 @@ private data class ServiceCalendar(
 )
 
 private class StaticGtfsLookup(
-  private val headsigns: Map<TripStopKey, String>,
+  private val stopHeadsigns: Map<TripStopKey, String>,
+  private val tripHeadsigns: Map<String, String>,
+  private val directionDestinations: Map<RouteDirectionKey, String>,
+  private val defaultHeadsignsByStop: Map<String, String>,
   private val stopCallsByRoute: Map<String, List<StaticStopCall>>,
   private val calendars: Map<String, ServiceCalendar>,
   private val calendarExceptions: Map<Int, Map<String, Int>>,
+  private val feedStartDate: Int?,
+  private val feedEndDate: Int?,
 ) {
-  fun headsignFor(tripId: String, stopId: String): String? =
-    headsigns[TripStopKey(tripId, stopId)]
+  fun isFeedExpired(nowMillis: Long): Boolean {
+    val todayDate = agencyDate(nowMillis)
+    return TransitRules.isFeedExpired(todayDate, feedEndDate)
+  }
+  fun headsignFor(
+    tripId: String?,
+    stopId: String,
+    routeId: String,
+    directionId: Int?,
+  ): String? {
+    if (tripId != null) {
+      stopHeadsigns[TripStopKey(tripId, stopId)]?.let { return it }
+      tripHeadsigns[tripId]?.let { return it }
+    }
+    if (directionId != null) {
+      directionDestinations[RouteDirectionKey(routeId, directionId)]?.let { return it }
+    }
+    return defaultHeadsignsByStop[stopId]
+  }
 
   fun scheduledArrivals(
     stop: TransitStopConfig,
     nowMillis: Long,
   ): List<TransitArrival> {
+    if (isFeedExpired(nowMillis)) return emptyList()
+
     val timeZone = TimeZone.getTimeZone(TransitConfig.agencyTimeZone)
     val calls =
       stopCallsByRoute[stop.displayRouteName]
         .orEmpty()
         .filter { it.stopId == stop.stopId }
     val arrivals = mutableListOf<TransitArrival>()
+    val todayDate = agencyDate(nowMillis)
+    val feedNotYetStarted =
+      TransitRules.isFeedNotYetStarted(todayDate, feedStartDate) ||
+        (feedStartDate == null && calendars.values.any { it.startDate > todayDate })
 
     for (dayOffset in -1..1) {
       val serviceDay =
@@ -468,19 +792,21 @@ private class StaticGtfsLookup(
       val dayOfWeek = serviceDay.get(Calendar.DAY_OF_WEEK)
 
       for (call in calls) {
-        if (!isServiceActive(call.serviceId, date, dayOfWeek)) continue
+        if (!isServiceActive(call.serviceId, date, dayOfWeek, feedNotYetStarted)) continue
 
         val arrivalTime =
           (serviceDay.clone() as Calendar)
             .apply { add(Calendar.SECOND, call.arrivalSeconds) }
             .timeInMillis
         if (arrivalTime < nowMillis - PAST_GRACE_MILLIS) continue
+        if (arrivalTime - nowMillis > MAX_SCHEDULED_AHEAD_MILLIS) continue
 
         arrivals +=
           TransitArrival(
             arrivalTimeMillis = arrivalTime,
             tripId = call.tripId,
             destination = call.destination,
+            tracked = false,
           )
       }
     }
@@ -491,12 +817,21 @@ private class StaticGtfsLookup(
       .take(2)
   }
 
-  private fun isServiceActive(serviceId: String, date: Int, dayOfWeek: Int): Boolean {
+  private fun isServiceActive(
+    serviceId: String,
+    date: Int,
+    dayOfWeek: Int,
+    feedNotYetStarted: Boolean,
+  ): Boolean {
     val calendar = calendars[serviceId]
     var active =
-      calendar != null &&
-        date in calendar.startDate..calendar.endDate &&
-        calendar.activeDays[dayOfWeek] == true
+      if (calendar == null) {
+        false
+      } else {
+        TransitRules.calendarHasStarted(date, calendar.startDate, feedNotYetStarted) &&
+          date <= calendar.endDate &&
+          calendar.activeDays[dayOfWeek] == true
+      }
 
     when (calendarExceptions[date]?.get(serviceId)) {
       1 -> active = true
@@ -505,7 +840,18 @@ private class StaticGtfsLookup(
     return active
   }
 
+  private fun agencyDate(nowMillis: Long): Int {
+    val calendar =
+      Calendar.getInstance(TimeZone.getTimeZone(TransitConfig.agencyTimeZone)).apply {
+        timeInMillis = nowMillis
+      }
+    return calendar.get(Calendar.YEAR) * 10_000 +
+      (calendar.get(Calendar.MONTH) + 1) * 100 +
+      calendar.get(Calendar.DAY_OF_MONTH)
+  }
+
   private companion object {
     const val PAST_GRACE_MILLIS = 60_000L
+    const val MAX_SCHEDULED_AHEAD_MILLIS = 90L * 60L * 1_000L
   }
 }

@@ -34,6 +34,8 @@ internal object DreamVisualStyle {
   val secondaryTextColor: Int = Color.rgb(174, 174, 170)
   val transitLabelTextColor: Int = Color.rgb(204, 204, 200)
   val transitDestinationTextColor: Int = Color.rgb(158, 158, 154)
+  val scheduledTransitTextColor: Int = Color.rgb(186, 158, 204)
+  val scheduledTransitDestinationTextColor: Int = Color.rgb(164, 140, 184)
   const val clockTextSizeSp: Float = 104f
   const val dateTextSizeSp: Float = 32f
   const val weatherTextSizeSp: Float = 26f
@@ -45,6 +47,7 @@ internal object DreamVisualStyle {
   const val fontFamily: String = "sans-serif"
   const val dateTopMarginDp: Int = 8
   const val weatherTopMarginDp: Int = 14
+  const val aqiTopMarginDp: Int = 6
   const val transitTopMarginDp: Int = 24
   const val transitRowSpacingDp: Int = 6
   const val transitLabelWidthDp: Int = 56
@@ -58,11 +61,13 @@ class FarragutDreamService : DreamService() {
   private lateinit var clockView: TextView
   private lateinit var dateView: TextView
   private lateinit var weatherView: TextView
+  private lateinit var aqiView: TextView
   private lateinit var transitContainer: LinearLayout
   private lateinit var compositionView: LinearLayout
   private val transitRouteLabelViews = mutableMapOf<String, TextView>()
   private val transitArrivalViews = mutableMapOf<String, List<TextView>>()
   private val transitArrivalsByRoute = mutableMapOf<String, List<TransitArrival>>()
+  private var lastTransitSuccessMillis: Long? = null
   private var dreamScope: CoroutineScope? = null
   private var use24HourTime: Boolean = false
   private var useTrolleyDisplay: Boolean = false
@@ -83,6 +88,7 @@ class FarragutDreamService : DreamService() {
 
         val now = System.currentTimeMillis()
         applyNightBrightness()
+        hideExpiredWeather(now)
         renderTransitArrivals(now)
         handler.postDelayed(this, MILLIS_PER_MINUTE - (now % MILLIS_PER_MINUTE))
       }
@@ -129,6 +135,8 @@ class FarragutDreamService : DreamService() {
   override fun onDreamingStopped() {
     handler.removeCallbacks(clockUpdater)
     handler.removeCallbacks(brightnessApplier)
+    lastTransitSuccessMillis = null
+    transitArrivalsByRoute.clear()
     stopWeatherUpdates()
     super.onDreamingStopped()
   }
@@ -136,6 +144,8 @@ class FarragutDreamService : DreamService() {
   override fun onDetachedFromWindow() {
     handler.removeCallbacks(clockUpdater)
     handler.removeCallbacks(brightnessApplier)
+    lastTransitSuccessMillis = null
+    transitArrivalsByRoute.clear()
     stopWeatherUpdates()
     super.onDetachedFromWindow()
   }
@@ -151,6 +161,10 @@ class FarragutDreamService : DreamService() {
 
     dateView = secondaryTextView(DreamVisualStyle.dateTextSizeSp)
     weatherView =
+      secondaryTextView(DreamVisualStyle.weatherTextSizeSp).apply {
+        visibility = View.GONE
+      }
+    aqiView =
       secondaryTextView(DreamVisualStyle.weatherTextSizeSp).apply {
         visibility = View.GONE
       }
@@ -182,6 +196,14 @@ class FarragutDreamService : DreamService() {
               LinearLayout.LayoutParams.WRAP_CONTENT,
             )
             .apply { topMargin = DreamVisualStyle.weatherTopMarginDp.toPixels() },
+        )
+        addView(
+          aqiView,
+          LinearLayout.LayoutParams(
+              LinearLayout.LayoutParams.WRAP_CONTENT,
+              LinearLayout.LayoutParams.WRAP_CONTENT,
+            )
+            .apply { topMargin = DreamVisualStyle.aqiTopMarginDp.toPixels() },
         )
         addView(
           transitContainer,
@@ -347,10 +369,7 @@ class FarragutDreamService : DreamService() {
     dreamScope =
       CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate).also { scope ->
         scope.launch {
-          val cachedWeather = weatherRepository.cachedWeather()
-          if (cachedWeather == null || weatherRepository.isStale(cachedWeather)) {
-            refreshWeather()
-          }
+          refreshWeather()
 
           while (isActive) {
             delay(WeatherRepository.CACHE_MAX_AGE_MILLIS)
@@ -394,15 +413,16 @@ class FarragutDreamService : DreamService() {
     } catch (exception: CancellationException) {
       throw exception
     } catch (_: Exception) {
-      // Keep showing the last successful result, or no weather line at all.
+      hideExpiredWeather()
     }
   }
 
   private suspend fun refreshTransit() {
     try {
-      transitRepository.refreshArrivals().forEach { (route, arrivals) ->
-        transitArrivalsByRoute[route] = arrivals
-      }
+      val refreshed = transitRepository.refreshArrivals()
+      transitArrivalsByRoute.clear()
+      transitArrivalsByRoute.putAll(refreshed)
+      lastTransitSuccessMillis = System.currentTimeMillis()
       renderTransitArrivals()
     } catch (exception: CancellationException) {
       throw exception
@@ -412,22 +432,48 @@ class FarragutDreamService : DreamService() {
   }
 
   private fun showWeather(weather: WeatherSnapshot) {
+    if (weatherRepository.isDisplayExpired(weather)) {
+      weatherView.visibility = View.GONE
+      aqiView.visibility = View.GONE
+      return
+    }
     weatherView.text =
       "${weather.temperatureF.roundToInt()}°  ${weatherCondition(weather.weatherCode)}" +
       "  ·  H ${weather.highF.roundToInt()}°  L ${weather.lowF.roundToInt()}°"
     weatherView.visibility = View.VISIBLE
+    val usAqi = weather.usAqi
+    if (usAqi == null) {
+      aqiView.visibility = View.GONE
+    } else {
+      aqiView.text = "AQI ${usAqi}  ${usAqiCategory(usAqi)}"
+      aqiView.visibility = View.VISIBLE
+    }
+  }
+
+  private fun hideExpiredWeather(nowMillis: Long = System.currentTimeMillis()) {
+    val cached = weatherRepository.cachedWeather()
+    if (cached == null || weatherRepository.isDisplayExpired(cached, nowMillis)) {
+      weatherView.visibility = View.GONE
+      aqiView.visibility = View.GONE
+    }
   }
 
   private fun renderTransitArrivals(nowMillis: Long = System.currentTimeMillis()) {
+    val arrivalsAreStale = TransitRules.isDisplayStale(lastTransitSuccessMillis, nowMillis)
     for (stop in TransitConfig.stops) {
       val arrivals =
-        transitArrivalsByRoute[stop.displayRouteName]
-          .orEmpty()
-          .filter { it.arrivalTimeMillis >= nowMillis - ARRIVAL_PAST_GRACE_MILLIS }
-          .take(MAX_DISPLAYED_ARRIVALS)
+        if (arrivalsAreStale) {
+          emptyList()
+        } else {
+          transitArrivalsByRoute[stop.displayRouteName]
+            .orEmpty()
+            .filter { it.arrivalTimeMillis >= nowMillis - ARRIVAL_PAST_GRACE_MILLIS }
+            .take(MAX_DISPLAYED_ARRIVALS)
+        }
       transitArrivalViews.getValue(stop.displayRouteName).forEachIndexed { index, view ->
         val arrival = arrivals.getOrNull(index)
         if (arrival == null) {
+          view.setTextColor(DreamVisualStyle.secondaryTextColor)
           view.text = NO_ARRIVALS_TEXT
         } else {
           view.text = formatTransitArrival(arrival, nowMillis)
@@ -440,9 +486,27 @@ class FarragutDreamService : DreamService() {
   private fun formatTransitArrival(arrival: TransitArrival, nowMillis: Long): CharSequence {
     val arrivalText = formatArrival(arrival.arrivalTimeMillis, nowMillis)
     val prefix = "$arrivalText   → "
+    val timeColor =
+      if (arrival.tracked) {
+        DreamVisualStyle.secondaryTextColor
+      } else {
+        DreamVisualStyle.scheduledTransitTextColor
+      }
+    val destinationColor =
+      if (arrival.tracked) {
+        DreamVisualStyle.transitDestinationTextColor
+      } else {
+        DreamVisualStyle.scheduledTransitDestinationTextColor
+      }
     return SpannableString(prefix + arrival.destination).apply {
       setSpan(
-        ForegroundColorSpan(DreamVisualStyle.transitDestinationTextColor),
+        ForegroundColorSpan(timeColor),
+        0,
+        prefix.length,
+        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+      )
+      setSpan(
+        ForegroundColorSpan(destinationColor),
         prefix.length,
         length,
         Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
@@ -488,6 +552,7 @@ class FarragutDreamService : DreamService() {
     clockView.textSize = clockSize
     dateView.textSize = dateSize
     weatherView.textSize = weatherSize
+    aqiView.textSize = weatherSize
     transitRouteLabelViews.values.forEach { it.textSize = transitSize }
     transitArrivalViews.values.flatten().forEach { it.textSize = transitSize }
     compositionView.requestLayout()
