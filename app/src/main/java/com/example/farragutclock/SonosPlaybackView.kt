@@ -28,15 +28,17 @@ internal fun sonosPlaybackGroupView(
       setTextColor(if (primary) SonosVisualStyle.primaryTextColor else SonosVisualStyle.secondaryTextColor)
       includeFontPadding = false
       maxLines = lines
-      ellipsize = TextUtils.TruncateAt.END
+      ellipsize = if (lines == Int.MAX_VALUE) null else TextUtils.TruncateAt.END
     }, LinearLayout.LayoutParams(
       LinearLayout.LayoutParams.MATCH_PARENT,
       LinearLayout.LayoutParams.WRAP_CONTENT,
     ).apply { topMargin = (6 * resources.displayMetrics.density).roundToInt() })
   }
   addLine(playback.roomNames.joinToString(" · "), 16f)
-  addLine(playback.current.podcastSeries, if (multipleGroups) 22f else 26f, lines = 2)
-  addLine(playback.current.title, if (multipleGroups) 34f else 48f, primary = true, lines = 2)
+  val podcast = playback.current.podcastSeries.isNotBlank()
+  addLine(playback.current.podcastSeries, if (multipleGroups) 22f else 26f, lines = Int.MAX_VALUE)
+  addLine(sonosPodcastEpisodeTitle(playback.current), if (multipleGroups) 34f else 48f,
+    primary = true, lines = if (podcast) Int.MAX_VALUE else 2)
   // Podcast publishers sometimes repeat the series in the creator field.
   if (!playback.current.artist.equals(playback.current.podcastSeries, ignoreCase = true)) {
     addLine(playback.current.artist, if (multipleGroups) 22f else 26f)
@@ -48,7 +50,7 @@ internal fun sonosTrackSummary(track: SonosTrack): String {
   val parts = if (track.podcastSeries.isBlank()) {
     listOf(track.title, track.artist)
   } else {
-    listOf(track.title, track.podcastSeries).distinct()
+    listOf(sonosPodcastEpisodeTitle(track), track.podcastSeries).distinct()
   }
   return parts.filter(String::isNotBlank).joinToString(" — ")
 }

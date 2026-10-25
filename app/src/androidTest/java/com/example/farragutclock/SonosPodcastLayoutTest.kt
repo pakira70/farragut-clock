@@ -31,6 +31,12 @@ class SonosPodcastLayoutTest {
     assertEquals(3, radio.childCount)
     assertEquals("AFTERNOON SHOW", (radio.getChildAt(1) as TextView).text.toString())
     assertEquals("Same — Same", sonosTrackSummary(SonosTrack("Same", "Same")))
+
+    val pocketCasts = SonosTrack("In Moscow's Shadows 268: Peace and (Info) War",
+      podcastSeries = "In Moscow's Shadows")
+    val actual = sonosPlaybackGroupView(context, SonosPlayback(listOf("Living Room"), pocketCasts), false, "")
+    assertEquals("268: PEACE AND (INFO) WAR", (actual.getChildAt(2) as TextView).text.toString())
+    assertEquals("268: Peace and (Info) War — In Moscow's Shadows", sonosTrackSummary(pocketCasts))
   }
 
   @Test
@@ -68,6 +74,19 @@ class SonosPodcastLayoutTest {
       assertTrue("Podcast groups fit below top padding", bounds.top >= scene.musicFrame.paddingTop - 1f)
       assertTrue("Podcast groups fit horizontally", bounds.left >= scene.musicFrame.paddingLeft - 1f &&
         bounds.right <= width - scene.musicFrame.paddingRight + 1f)
+      repeat(groups.childCount) { groupIndex ->
+        val group = groups.getChildAt(groupIndex) as LinearLayout
+        listOf(1, 2).forEach { lineIndex ->
+          val textView = group.getChildAt(lineIndex) as TextView
+          val layout = textView.layout
+          assertTrue("Full podcast text is laid out", layout.lineCount > 0)
+          assertEquals("No episode or series text is omitted", textView.text.length,
+            layout.getLineEnd(layout.lineCount - 1))
+          repeat(layout.lineCount) { line ->
+            assertEquals("Podcast rows must not ellipsize", 0, layout.getEllipsisCount(line))
+          }
+        }
+      }
     }
   }
 
