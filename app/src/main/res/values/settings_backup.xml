@@ -1,0 +1,17 @@
+<resources>
+    <string name="settings_backup_title">Settings backup</string>
+    <string name="settings_backup_help">Save your display, followed rooms, and recognition choices to a file. Restore a saved file to replace those choices.</string>
+    <string name="settings_backup_export">Save backup</string>
+    <string name="settings_backup_import">Restore backup</string>
+    <string name="settings_backup_limitations">API keys and recordings are not included. Restoring does not reset recognition usage or change Android access. On a new or reset tablet, screen saver setup, accessibility access, YouTube Music microphone permission, and its tablet-only mute must be set up separately.</string>
+    <string name="settings_backup_exported">Settings backup saved to your chosen file.</string>
+    <string name="settings_backup_restored">Settings restored.</string>
+    <string name="settings_backup_export_failed">Couldn’t save the backup. Choose a writable location and try again.</string>
+    <string name="settings_backup_import_failed">Couldn’t restore the backup. Check that the file is available and try again.</string>
+    <string name="settings_backup_invalid">This is not a valid Farragut Clock settings backup. Your settings were not changed.</string>
+    <string name="settings_backup_version">This backup uses an unsupported format version. Your settings were not changed.</string>
+    <string name="settings_backup_too_large">This file is too large for a settings backup. Your settings were not changed.</string>
+    <string name="settings_backup_ytm_reminder">For YouTube Music recognition, enable the Farragut Clock bridge in Android accessibility settings and allow YouTube Music microphone access. The accessibility shortcut can stay off. The YTM mute is separate from this backup.</string>
+    <string name="settings_backup_android_setup">Open accessibility settings</string>
+    <string name="settings_backup_setup_failed">Open Android Settings &gt; Accessibility to check the Farragut Clock bridge.</string>
+</resources>

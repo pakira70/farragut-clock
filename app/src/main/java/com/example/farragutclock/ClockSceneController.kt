@@ -10,7 +10,6 @@ import android.os.Looper
 import android.os.SystemClock
 import android.text.SpannableString
 import android.text.Spanned
-import android.text.TextUtils
 import android.text.style.ForegroundColorSpan
 import android.view.Gravity
 import android.view.View
@@ -536,43 +535,16 @@ internal class ClockSceneController(
   private fun renderSonosPlayback() {
     musicContainer.removeAllViews()
     val multipleGroups = displayedPlayback.size > 1
-    val songTypeface = SonosVisualStyle.typeface(this)
     displayedPlayback.forEachIndexed { index, playback ->
-      val group = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        gravity = Gravity.CENTER_HORIZONTAL
-      }
-      fun addLine(text: String, size: Float, primary: Boolean = false, lines: Int = 1) {
-        if (text.isBlank()) return
-        group.addView(secondaryTextView(size).apply {
-          this.text = text.uppercase(Locale.ROOT)
-          typeface = songTypeface
-          setTextColor(if (primary) SonosVisualStyle.primaryTextColor else SonosVisualStyle.secondaryTextColor)
-          includeFontPadding = false
-          maxLines = lines
-          ellipsize = TextUtils.TruncateAt.END
-        }, LinearLayout.LayoutParams(
-          LinearLayout.LayoutParams.MATCH_PARENT,
-          LinearLayout.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = 6.toPixels() })
-      }
-      addLine(playback.roomNames.joinToString(" · "), 16f)
-      addLine(playback.current.title, if (multipleGroups) 34f else 48f, primary = true, lines = 2)
-      addLine(playback.current.artist, if (multipleGroups) 22f else 26f)
-      if (playback.isLineInRecognitionEligible && displayedRecognitionStatus.isNotBlank()) {
-        addLine(displayedRecognitionStatus, 14f, lines = 2)
-      }
+      val group = sonosPlaybackGroupView(this, playback, multipleGroups, displayedRecognitionStatus)
       musicContainer.addView(group, LinearLayout.LayoutParams(
         LinearLayout.LayoutParams.MATCH_PARENT,
         LinearLayout.LayoutParams.WRAP_CONTENT,
       ).apply { if (index > 0) topMargin = 20.toPixels() })
     }
-    sceneView.ticker.songText = displayedPlayback.map { trackSummary(it.current) }
+    sceneView.ticker.songText = displayedPlayback.map { sonosTrackSummary(it.current) }
       .distinct().joinToString("     ·     ").uppercase(Locale.ROOT)
   }
-
-  private fun trackSummary(track: SonosTrack): String =
-    listOf(track.title, track.artist).filter { it.isNotBlank() }.joinToString(" — ")
 
   private suspend fun refreshWeather() {
     try {

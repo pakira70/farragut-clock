@@ -25,6 +25,8 @@ import java.net.InetAddress
 import java.net.NetworkInterface
 import java.net.SocketTimeoutException
 import java.net.URL
+import java.net.URLDecoder
+import java.util.Locale
 import javax.xml.parsers.DocumentBuilderFactory
 
 /** Read-only local Sonos monitoring. No account, cloud service, or playback changes. */
@@ -106,8 +108,8 @@ internal class SonosRepository(context: Context) {
     val transport = soap(host, "AVTransport", "GetTransportInfo", INSTANCE_ID)
     if (SonosXml.value(transport, "CurrentTransportState") != "PLAYING") return null
     val position = soap(host, "AVTransport", "GetPositionInfo", INSTANCE_ID)
-    val positionTrack = SonosXml.track(SonosXml.value(position, "TrackMetaData"))
     val positionUri = SonosXml.value(position, "TrackURI")
+    val positionTrack = SonosXml.track(SonosXml.value(position, "TrackMetaData"), positionUri)
     val media = if (positionTrack == null || positionUri.isBlank()) {
       optionalSoap(host, "AVTransport", "GetMediaInfo", INSTANCE_ID)
     } else {
@@ -115,7 +117,7 @@ internal class SonosRepository(context: Context) {
     }
     val uri = positionUri.ifBlank { media?.let { SonosXml.value(it, "CurrentURI") }.orEmpty() }
     val current = positionTrack
-      ?: media?.let { SonosXml.track(SonosXml.value(it, "CurrentURIMetaData")) }
+      ?: media?.let { SonosXml.track(SonosXml.value(it, "CurrentURIMetaData"), uri) }
       ?: SonosTrack(when (sonosPlaybackSource(uri)) {
           SonosPlaybackSource.TV_AUDIO -> "TV Audio"
           SonosPlaybackSource.LINE_IN -> "Line-in"
@@ -273,23 +275,64 @@ internal object SonosXml {
     return result.distinctBy(SonosRoom::id).sortedBy { it.name.lowercase() }
   }
 
-  fun track(xml: String): SonosTrack? {
+  fun track(xml: String, sourceUri: String = ""): SonosTrack? {
     if (xml.isBlank() || xml == "NOT_IMPLEMENTED") return null
     return try {
       val metadata = document(xml)
-      val stream = value(metadata, "streamContent").takeUnless { it.isBlank() || it.startsWith("ZPSTR_") }
-      val artist = value(metadata, "creator").ifBlank { value(metadata, "artist") }
-      val title = value(metadata, "title")
-      when {
+      // Queue metadata can contain multiple items. Do not attach the next episode's series.
+      val item = metadata.getElementsByTagNameNS("*", "item").item(0) as? Element ?: metadata.documentElement
+      fun field(name: String): String = item.getElementsByTagNameNS("*", name).item(0)
+        ?.textContent?.trim().orEmpty()
+      val stream = field("streamContent").takeUnless { it.isBlank() || it.startsWith("ZPSTR_") }
+      val artist = field("creator").ifBlank { field("artist") }
+      val title = field("title")
+      val album = field("album")
+      val series = podcastSeries(item, sourceUri)
+      val track = when {
         stream != null && artist.isBlank() && stream.contains(" - ") ->
-          SonosTrack(stream.substringAfter(" - "), stream.substringBefore(" - "), value(metadata, "album"))
-        stream != null && artist.isBlank() -> SonosTrack(stream, album = value(metadata, "album"))
-        title.isNotBlank() -> SonosTrack(title, artist, value(metadata, "album"))
+          SonosTrack(stream.substringAfter(" - "), stream.substringBefore(" - "), album)
+        stream != null && artist.isBlank() -> SonosTrack(stream, album = album)
+        title.isNotBlank() -> SonosTrack(title, artist, album)
         else -> null
       }
+      track?.copy(podcastSeries = series)
     } catch (_: Exception) {
       null
     }
+  }
+
+  private fun podcastSeries(item: Element, sourceUri: String): String {
+    fun field(name: String): String = item.getElementsByTagNameNS("*", name).item(0)
+      ?.textContent?.trim().orEmpty()
+    // Sonos SMAPI defines podcast separately from album and the individual episode title.
+    val explicitSeries = field("podcast")
+    if (explicitSeries.isNotBlank()) return explicitSeries
+    val semanticType = field("semanticType").lowercase(Locale.ROOT)
+    val itemClass = field("class").lowercase(Locale.ROOT)
+    val podcastClass = itemClass.startsWith("object.item.audioitem.") &&
+      (itemClass.split('.').contains("podcast") || itemClass.endsWith(".recentshow"))
+    val isPodcast = semanticType == "episode.podcast" || semanticType == "podcast" ||
+      podcastClass || isSpotifyEpisode(sourceUri) || isSpotifyEpisode(field("res"))
+    if (!isPodcast) return ""
+    val album = field("album")
+    if (album.isNotBlank()) return album
+    // Sonos recorded-show DIDL may put its series in the Rincon description instead of album.
+    // Generic dc:description is often an episode summary, so it is deliberately not a fallback.
+    return item.getElementsByTagNameNS("urn:schemas-rinconnetworks-com:metadata-1-0/", "description")
+      .item(0)?.textContent?.trim().orEmpty()
+  }
+
+  private fun isSpotifyEpisode(sourceUri: String): Boolean {
+    val uri = sourceUri.trim()
+    val spotifyUri = when {
+      uri.startsWith("spotify:", ignoreCase = true) -> uri
+      uri.startsWith("x-sonos-spotify:", ignoreCase = true) -> try {
+        URLDecoder.decode(uri.substringAfter(':'), "UTF-8")
+      } catch (_: IllegalArgumentException) { return false }
+      else -> return false
+    }
+    return Regex("^spotify:episode:[A-Za-z0-9]+(?:[?&#].*)?$", RegexOption.IGNORE_CASE)
+      .matches(spotifyUri)
   }
 
   fun discoveryHost(response: String): String? {

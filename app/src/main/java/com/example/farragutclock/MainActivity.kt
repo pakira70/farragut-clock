@@ -24,8 +24,11 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -34,6 +37,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.example.farragutclock.theme.FarragutClockTheme
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 class MainActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
@@ -43,13 +47,15 @@ class MainActivity : ComponentActivity() {
     setContent {
       FarragutClockTheme {
         val context = LocalContext.current
-        var use24HourTime by remember {
+        var restoreGeneration by rememberSaveable { mutableIntStateOf(0) }
+        val backupRevision by SettingsBackupStorage.revision.collectAsStateWithLifecycle()
+        var use24HourTime by remember(restoreGeneration, backupRevision) {
           mutableStateOf(ClockPreferences.uses24HourTime(context))
         }
-        var useTrolleyDisplay by remember {
+        var useTrolleyDisplay by remember(restoreGeneration, backupRevision) {
           mutableStateOf(ClockPreferences.usesTrolleyDisplay(context))
         }
-        var nightBrightness by remember {
+        var nightBrightness by remember(restoreGeneration, backupRevision) {
           mutableStateOf(ClockPreferences.nightBrightness(context))
         }
 
@@ -72,6 +78,11 @@ class MainActivity : ComponentActivity() {
               style = MaterialTheme.typography.bodyLarge,
             )
             Spacer(modifier = Modifier.height(32.dp))
+            SettingsBackupPanel(
+              onRestored = { restoreGeneration++ },
+              modifier = Modifier.widthIn(max = 420.dp).fillMaxWidth(),
+            )
+            Spacer(modifier = Modifier.height(24.dp))
             Row(
               modifier = Modifier.widthIn(max = 420.dp).fillMaxWidth(),
               verticalAlignment = Alignment.CenterVertically,
@@ -125,9 +136,11 @@ class MainActivity : ComponentActivity() {
               )
             }
             Spacer(modifier = Modifier.height(32.dp))
-            SonosSettings(modifier = Modifier.widthIn(max = 420.dp).fillMaxWidth())
-            Spacer(modifier = Modifier.height(24.dp))
-            RecognitionSettings(modifier = Modifier.widthIn(max = 420.dp).fillMaxWidth())
+            key(restoreGeneration, backupRevision) {
+              SonosSettings(modifier = Modifier.widthIn(max = 420.dp).fillMaxWidth())
+              Spacer(modifier = Modifier.height(24.dp))
+              RecognitionSettings(modifier = Modifier.widthIn(max = 420.dp).fillMaxWidth())
+            }
             Spacer(modifier = Modifier.height(16.dp))
             TextButton(onClick = {
               val testActivity =

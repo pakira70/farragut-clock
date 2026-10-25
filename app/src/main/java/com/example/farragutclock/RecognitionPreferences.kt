@@ -22,8 +22,8 @@ internal class RecognitionProviderChangedException : IllegalStateException(
 /** Recognition consent and bounded trial usage; user credentials never enter shared preferences. */
 internal object RecognitionPreferences {
   private const val PREFERENCES = "recognition_preferences"
-  private const val ENABLED = "enabled"
-  private const val PROVIDER = "provider"
+  internal const val ENABLED = "enabled"
+  internal const val PROVIDER = "provider"
   private const val TRIAL_DAY = "trial_day_utc"
   private const val TRIAL_COUNT = "trial_requests"
   private const val AUDD_COUNT = "audd_requests_lifetime"
@@ -43,25 +43,28 @@ internal object RecognitionPreferences {
     RecognitionProvider.YOUTUBE_MUSIC -> 0 // YouTube Music owns its microphone capture.
   }
 
+  @Synchronized
   fun provider(context: Context): RecognitionProvider =
     runCatching {
       RecognitionProvider.valueOf(
-        context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+        SettingsBackupStorage.preferences(context, PREFERENCES)
           .getString(PROVIDER, RecognitionProvider.AUDD.name)!!,
       )
     }.getOrDefault(RecognitionProvider.AUDD)
 
   @Synchronized
   fun setProvider(context: Context, provider: RecognitionProvider) {
-    context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+    SettingsBackupStorage.preferences(context, PREFERENCES)
       .edit().putString(PROVIDER, provider.name).apply()
   }
 
+  @Synchronized
   fun isEnabled(context: Context): Boolean =
-    context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).getBoolean(ENABLED, false)
+    SettingsBackupStorage.preferences(context, PREFERENCES).getBoolean(ENABLED, false)
 
+  @Synchronized
   fun setEnabled(context: Context, enabled: Boolean) {
-    context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+    SettingsBackupStorage.preferences(context, PREFERENCES)
       .edit().putBoolean(ENABLED, enabled).apply()
   }
 
