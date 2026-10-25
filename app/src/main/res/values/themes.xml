@@ -2,4 +2,12 @@
 <resources>
 
     <style name="Theme.FarragutClock" parent="android:Theme.Material.Light.NoActionBar" />
+
+    <style name="Theme.FarragutClock.Display" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:colorBackground">@android:color/black</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowDisablePreview">true</item>
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
 </resources>

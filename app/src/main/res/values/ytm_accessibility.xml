@@ -1,0 +1,4 @@
+<resources>
+    <string name="ytm_service_label">Farragut Clock — YouTube Music bridge</string>
+    <string name="ytm_service_description">Identify music using YouTube Music when it is selected in Farragut Clock and Living Room or Kitchen plays Line-In. During recognition, the clock opens Sound Search, keeps the clock display visible, and reads the song and artist from YouTube Music. It reads only YouTube Music’s interface and captures only that window for text recognition on this tablet. Screenshots are not saved. Other apps are not inspected. You can also run a manual test. The accessibility shortcut is optional and can stay off.</string>
+</resources>

@@ -11,6 +11,22 @@ internal object ClockPreferences {
   private const val KEY_USE_24_HOUR_TIME = "use_24_hour_time"
   private const val KEY_NIGHT_BRIGHTNESS = "night_brightness"
   private const val KEY_USE_TROLLEY_DISPLAY = "use_trolley_display"
+  private const val KEY_SELECTED_SONOS_ROOM_IDS = "selected_sonos_room_ids"
+
+  // No saved selection means the household defaults; an empty saved set disables Sonos.
+  fun selectedSonosRoomIds(context: Context): Set<String>? =
+    context
+      .getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+      .getStringSet(KEY_SELECTED_SONOS_ROOM_IDS, null)
+      ?.toSet()
+
+  fun setSelectedSonosRoomIds(context: Context, roomIds: Set<String>) {
+    context
+      .getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+      .edit()
+      .putStringSet(KEY_SELECTED_SONOS_ROOM_IDS, roomIds.toSet())
+      .apply()
+  }
 
   fun uses24HourTime(context: Context): Boolean =
     context

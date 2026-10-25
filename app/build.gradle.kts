@@ -13,6 +13,7 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
@@ -54,6 +55,8 @@ dependencies {
   implementation(libs.androidx.activity.compose)
   implementation(libs.gtfs.realtime.bindings)
   implementation(libs.kotlinx.coroutines.core)
+  // Bundled, on-device OCR for the experimental YouTube Music result bridge.
+  implementation("com.google.mlkit:text-recognition:16.0.1")
 
   // Arch Components
   implementation(libs.androidx.lifecycle.runtime.compose)

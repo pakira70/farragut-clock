@@ -1,0 +1,9 @@
+<resources>
+    <string name="ytm_auto_provider">YouTube Music</string>
+    <string name="ytm_auto_help">Identify Line-In music playing in followed Living Room or Kitchen while the clock is visible. YouTube Music handles listening behind the clock display; the bridge reads the identified song and artist on this tablet. No API key or recognition subscription is needed.</string>
+    <string name="ytm_auto_ready">YouTube Music bridge is ready. Farragut Clock does not need microphone access for this provider. The accessibility shortcut can stay off.</string>
+    <string name="ytm_auto_setup_needed">Enable “Farragut Clock — YouTube Music bridge” in Android accessibility settings. Return here to finish turning on automatic recognition. The accessibility shortcut is optional and can stay off.</string>
+    <string name="ytm_auto_connecting">The YouTube Music bridge is enabled and waiting to connect.</string>
+    <string name="ytm_auto_bridge_settings">YouTube Music bridge settings</string>
+    <string name="ytm_auto_settings_unavailable">Couldn’t open accessibility settings. Open Android Settings &gt; Accessibility and enable “Farragut Clock — YouTube Music bridge”.</string>
+</resources>

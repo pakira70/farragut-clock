@@ -1,6 +1,7 @@
 package com.example.farragutclock
 
 import android.os.Bundle
+import android.content.Intent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -14,11 +15,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -51,8 +55,10 @@ class MainActivity : ComponentActivity() {
 
         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
           Column(
-            modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(32.dp),
-            verticalArrangement = Arrangement.Center,
+            modifier =
+              Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState())
+                .padding(32.dp),
+            verticalArrangement = Arrangement.Top,
             horizontalAlignment = Alignment.CenterHorizontally,
           ) {
             Text(
@@ -117,6 +123,22 @@ class MainActivity : ComponentActivity() {
                   ClockPreferences.MIN_NIGHT_BRIGHTNESS..
                     ClockPreferences.MAX_NIGHT_BRIGHTNESS,
               )
+            }
+            Spacer(modifier = Modifier.height(32.dp))
+            SonosSettings(modifier = Modifier.widthIn(max = 420.dp).fillMaxWidth())
+            Spacer(modifier = Modifier.height(24.dp))
+            RecognitionSettings(modifier = Modifier.widthIn(max = 420.dp).fillMaxWidth())
+            Spacer(modifier = Modifier.height(16.dp))
+            TextButton(onClick = {
+              val testActivity =
+                if (RecognitionPreferences.provider(context) == RecognitionProvider.YOUTUBE_MUSIC) {
+                  YtmRecognitionTestActivity::class.java
+                } else {
+                  SongRecognitionTestActivity::class.java
+                }
+              context.startActivity(Intent(context, testActivity))
+            }) {
+              Text(stringResource(R.string.recognition_test_title))
             }
           }
         }
