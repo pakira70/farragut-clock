@@ -14,6 +14,8 @@ internal data class SonosTrack(
   val album: String = "",
   /** A named podcast/recorded-show series, only when the source supplies podcast identity. */
   val podcastSeries: String = "",
+  /** Station identity when a live-radio program replaces a technical stream resource title. */
+  val radioStation: String = "",
 )
 
 internal data class SonosPlayback(

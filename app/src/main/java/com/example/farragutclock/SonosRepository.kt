@@ -25,6 +25,7 @@ import java.net.InetAddress
 import java.net.NetworkInterface
 import java.net.SocketTimeoutException
 import java.net.URL
+import java.net.URI
 import java.net.URLDecoder
 import java.util.Locale
 import javax.xml.parsers.DocumentBuilderFactory
@@ -36,6 +37,7 @@ internal class SonosRepository(context: Context) {
   private var knownHosts = emptyList<String>()
   private var networkSignature = ""
   private var lastDiscoveryMillis = 0L
+  private val whyyPrograms = WhyyProgramRepository()
 
   suspend fun discoverRooms(): List<SonosRoom> = withContext(Dispatchers.IO) {
     topologyMutex.withLock { loadRooms(forceDiscovery = true) }
@@ -109,20 +111,30 @@ internal class SonosRepository(context: Context) {
     if (SonosXml.value(transport, "CurrentTransportState") != "PLAYING") return null
     val position = soap(host, "AVTransport", "GetPositionInfo", INSTANCE_ID)
     val positionUri = SonosXml.value(position, "TrackURI")
-    val positionTrack = SonosXml.track(SonosXml.value(position, "TrackMetaData"), positionUri)
-    val media = if (positionTrack == null || positionUri.isBlank()) {
+    val positionMetadata = SonosXml.value(position, "TrackMetaData")
+    val positionTrack = SonosXml.track(positionMetadata, positionUri)
+    val media = if (positionTrack == null || positionUri.isBlank() || SonosXml.isRadioUri(positionUri)) {
       optionalSoap(host, "AVTransport", "GetMediaInfo", INSTANCE_ID)
     } else {
       null
     }
     val uri = positionUri.ifBlank { media?.let { SonosXml.value(it, "CurrentURI") }.orEmpty() }
-    val current = positionTrack
-      ?: media?.let { SonosXml.track(SonosXml.value(it, "CurrentURIMetaData"), uri) }
+    val stationMetadata = media?.let { SonosXml.value(it, "CurrentURIMetaData") }.orEmpty()
+    var current = SonosXml.radioTrack(positionMetadata, stationMetadata, uri)
       ?: SonosTrack(when (sonosPlaybackSource(uri)) {
           SonosPlaybackSource.TV_AUDIO -> "TV Audio"
           SonosPlaybackSource.LINE_IN -> "Line-in"
           SonosPlaybackSource.OTHER -> "Sonos audio"
         })
+    if (positionUri.isNotBlank() && SonosXml.needsWhyyProgram(positionMetadata, stationMetadata, uri)) {
+      val program = whyyPrograms.currentProgram()
+      currentCoroutineContext().ensureActive()
+      // A lookup may outlast a station/source change. Never attach WHYY's program to its successor.
+      val refreshed = soap(host, "AVTransport", "GetPositionInfo", INSTANCE_ID)
+      if (SonosXml.value(refreshed, "TrackURI") != positionUri) return null
+      current = SonosXml.radioTrack(SonosXml.value(refreshed, "TrackMetaData"), stationMetadata, uri, program)
+        ?: return null
+    }
     // A paused track must not enter playback mode if it stopped during metadata requests.
     val latest = soap(host, "AVTransport", "GetTransportInfo", INSTANCE_ID)
     if (SonosXml.value(latest, "CurrentTransportState") != "PLAYING") return null
@@ -300,6 +312,87 @@ internal object SonosXml {
       null
     }
   }
+
+  fun isRadioUri(sourceUri: String): Boolean = sourceUri.trim().let { uri ->
+    listOf("x-rincon-mp3radio://", "x-sonosapi-stream:", "x-sonosapi-radio:")
+      .any { uri.startsWith(it, ignoreCase = true) }
+  }
+
+  /** Rich song/show/podcast metadata wins; only a verified resource basename is a placeholder. */
+  fun radioTrack(
+    trackMetadata: String,
+    stationMetadata: String,
+    sourceUri: String,
+    fallbackProgram: String? = null,
+  ): SonosTrack? {
+    val current = track(trackMetadata, sourceUri) ?: track(stationMetadata, sourceUri) ?: return null
+    val station = typedRadioStation(stationMetadata) ?: return current
+    if (!isTechnicalRadioTitle(current, trackMetadata, sourceUri)) return current
+    val program = radioShow(trackMetadata).ifBlank {
+      if (isWhyySource(sourceUri, station)) fallbackProgram?.trim().orEmpty() else ""
+    }
+    return if (program.isNotBlank()) current.copy(title = program, radioStation = station)
+      else current.copy(title = station)
+  }
+
+  fun needsWhyyProgram(trackMetadata: String, stationMetadata: String, sourceUri: String): Boolean {
+    val station = typedRadioStation(stationMetadata) ?: return false
+    val current = track(trackMetadata, sourceUri) ?: return false
+    return isWhyySource(sourceUri, station) && isTechnicalRadioTitle(current, trackMetadata, sourceUri) &&
+      radioShow(trackMetadata).isBlank()
+  }
+
+  private fun typedRadioStation(xml: String): String? {
+    return try {
+      val item = metadataItem(xml) ?: return null
+      val type = metadataField(item, "class")
+      if (!type.equals("object.item.audioItem.audioBroadcast", ignoreCase = true)) return null
+      metadataField(item, "title").takeIf { it.isNotBlank() }
+    } catch (_: Exception) { null }
+  }
+
+  private fun isTechnicalRadioTitle(current: SonosTrack, metadata: String, sourceUri: String): Boolean {
+    if (!isRadioUri(sourceUri) || current.artist.isNotBlank() || current.album.isNotBlank() ||
+      current.podcastSeries.isNotBlank()) return false
+    val item = try { metadataItem(metadata) } catch (_: Exception) { null } ?: return false
+    val stream = metadataField(item, "streamContent")
+    if (stream.isNotBlank() && !stream.startsWith("ZPSTR_")) return false
+    val basename = radioUrl(sourceUri)?.path?.substringAfterLast('/')?.takeIf { it.isNotBlank() } ?: return false
+    return current.title.equals(basename, ignoreCase = true)
+  }
+
+  private fun isWhyySource(sourceUri: String, station: String): Boolean {
+    if (!station.equals("WHYY", ignoreCase = true)) return false
+    val url = radioUrl(sourceUri) ?: return false
+    return url.scheme.equals("https", ignoreCase = true) && url.host.equals("whyy.streamguys1.com", ignoreCase = true) &&
+      url.rawPath == "/whyy_tunein" && url.userInfo == null && url.fragment == null &&
+      (url.port == -1 || url.port == 443)
+  }
+
+  private fun radioUrl(sourceUri: String): URI? = try {
+    val source = sourceUri.trim()
+    if (!source.startsWith("x-rincon-mp3radio://", ignoreCase = true)) null
+    else URI(source.substring("x-rincon-mp3radio://".length))
+      .takeIf { it.scheme.equals("https", true) || it.scheme.equals("http", true) }
+  } catch (_: Exception) { null }
+
+  private fun radioShow(xml: String): String {
+    return try {
+      val item = metadataItem(xml) ?: return ""
+      val show = metadataField(item, "radioShowMd")
+      // Sonos may append the service's program ID after a comma; preserve commas in actual names.
+      show.takeUnless { it.startsWith("ZPSTR_") }.orEmpty().replace(Regex(",\\s*p[0-9]+$"), "").trim()
+    } catch (_: Exception) { "" }
+  }
+
+  private fun metadataItem(xml: String): Element? {
+    if (xml.isBlank() || xml == "NOT_IMPLEMENTED") return null
+    val metadata = document(xml)
+    return metadata.getElementsByTagNameNS("*", "item").item(0) as? Element ?: metadata.documentElement
+  }
+
+  private fun metadataField(item: Element, name: String): String =
+    item.getElementsByTagNameNS("*", name).item(0)?.textContent?.trim().orEmpty()
 
   private fun podcastSeries(item: Element, sourceUri: String): String {
     fun field(name: String): String = item.getElementsByTagNameNS("*", name).item(0)

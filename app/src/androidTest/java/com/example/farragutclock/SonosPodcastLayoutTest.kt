@@ -37,6 +37,16 @@ class SonosPodcastLayoutTest {
     val actual = sonosPlaybackGroupView(context, SonosPlayback(listOf("Living Room"), pocketCasts), false, "")
     assertEquals("268: PEACE AND (INFO) WAR", (actual.getChildAt(2) as TextView).text.toString())
     assertEquals("268: Peace and (Info) War — In Moscow's Shadows", sonosTrackSummary(pocketCasts))
+
+    val whyy = SonosTrack("Morning Edition", radioStation = "WHYY")
+    val show = sonosPlaybackGroupView(context, SonosPlayback(listOf("Living Room"), whyy), false, "")
+    assertEquals(listOf("LIVING ROOM", "WHYY", "MORNING EDITION"),
+      (0 until show.childCount).map { (show.getChildAt(it) as TextView).text.toString() })
+    assertEquals("Morning Edition — WHYY", sonosTrackSummary(whyy))
+    val stationOnly = sonosPlaybackGroupView(context,
+      SonosPlayback(listOf("Living Room"), SonosTrack("WHYY", radioStation = "WHYY")), false, "")
+    assertEquals(2, stationOnly.childCount)
+    assertEquals("WHYY", sonosTrackSummary(SonosTrack("WHYY", radioStation = "WHYY")))
   }
 
   @Test

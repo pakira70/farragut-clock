@@ -37,17 +37,24 @@ internal fun sonosPlaybackGroupView(
   addLine(playback.roomNames.joinToString(" · "), 16f)
   val podcast = playback.current.podcastSeries.isNotBlank()
   addLine(playback.current.podcastSeries, if (multipleGroups) 22f else 26f, lines = Int.MAX_VALUE)
+  if (playback.current.radioStation.isNotBlank() &&
+      !playback.current.radioStation.equals(playback.current.title, ignoreCase = true)) {
+    addLine(playback.current.radioStation, if (multipleGroups) 22f else 26f, lines = Int.MAX_VALUE)
+  }
   addLine(sonosPodcastEpisodeTitle(playback.current), if (multipleGroups) 34f else 48f,
     primary = true, lines = if (podcast) Int.MAX_VALUE else 2)
   // Podcast publishers sometimes repeat the series in the creator field.
-  if (!playback.current.artist.equals(playback.current.podcastSeries, ignoreCase = true)) {
+  if (!playback.current.artist.equals(playback.current.podcastSeries, ignoreCase = true) &&
+      !playback.current.artist.equals(playback.current.radioStation, ignoreCase = true)) {
     addLine(playback.current.artist, if (multipleGroups) 22f else 26f)
   }
   if (playback.isLineInRecognitionEligible) addLine(recognitionStatus, 14f, lines = 2)
 }
 
 internal fun sonosTrackSummary(track: SonosTrack): String {
-  val parts = if (track.podcastSeries.isBlank()) {
+  val parts = if (track.radioStation.isNotBlank()) {
+    listOf(track.title, track.artist, track.radioStation).filter(String::isNotBlank).distinct()
+  } else if (track.podcastSeries.isBlank()) {
     listOf(track.title, track.artist)
   } else {
     listOf(sonosPodcastEpisodeTitle(track), track.podcastSeries).distinct()
